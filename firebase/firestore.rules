@@ -1,0 +1,141 @@
+// ============================================
+// GALAL ACADEMY — FIRESTORE SECURITY RULES
+// ============================================
+// إزاي تفعّلها:
+// Firebase Console → Firestore Database → Rules → الصق الكود ده → Publish
+//
+// ملحوظة مهمة عن الـ Admin:
+// عشان تتحدد صلاحية "Admin"، لازم تحط قيمة role = "admin" يدويًا
+// في مستند المستخدم بتاعك (users/{uid}) من Firebase Console بعد ما تعمل حسابك.
+// ============================================
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------- Helper Functions --------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+
+    // -------------------- users/{uid} --------------------
+    // الطالب يقدر يقرأ/يعدّل بروفايله بس. الإدمن يقدر يقرأ الكل.
+    //
+    // 🔴 ملحوظة أمان صريحة: تحديث XP بيحصل من كود الفرونت إند بعد تسليم الامتحان
+    // (submitExamResult) وبالتالي طالب متمرّس تقنيًا يقدر نظريًا يعدّل الكود
+    // ويبعت XP أعلى من المفروض، لأن التصحيح نفسه بيحصل في المتصفح مش في سيرفر
+    // موثوق. الحماية الكاملة من الغش (Anti-cheat) محتاجة Cloud Function تصحّح
+    // الامتحان وتحسب XP من على السيرفر بدل المتصفح — BACKEND REQUIRED لو حبيت
+    // تقفل الثغرة دي بشكل كامل مستقبلًا. حاليًا الأولوية كانت لتشغيل النظام
+    // بالكامل من غير سيرفر إضافي زي ما اتفقنا في الـ Architecture.
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid);
+      allow update: if isOwner(uid) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // -------------------- leaderboard/{uid} --------------------
+    // نسخة عامة آمنة من بيانات الطالب (اسم، صورة، XP فقط — من غير إيميل أو تليفون)
+    // مقروءة للجميع عشان لوحة المتصدرين تشتغل حتى للزوار غير المسجلين.
+    match /leaderboard/{uid} {
+      allow read: if true;
+      allow write: if isOwner(uid) || isAdmin();
+    }
+
+    // -------------------- enrollments/{enrollmentId} --------------------
+    // الطالب يقدر يعمل طلب اشتراك (create) ويشوف طلباته بس.
+    // الموافقة/الرفض (تعديل status) للإدمن بس.
+    match /enrollments/{enrollmentId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() &&
+                       request.resource.data.userId == request.auth.uid &&
+                       request.resource.data.status == "pending";
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // -------------------- progress/{uid}/courses/{courseId} --------------------
+    match /progress/{uid}/courses/{courseId} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if isOwner(uid) || isAdmin();
+    }
+
+    // -------------------- examResults/{resultId} --------------------
+    // الطالب يقدر يضيف نتيجة امتحان بتاعته بس، ويقرأ نتائجه بس.
+    match /examResults/{resultId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // -------------------- rewards/{rewardId} --------------------
+    // الجوائز معروضة للجميع كتحفيز (حتى الزوار غير المسجلين ممكن يشوفوها)
+    match /rewards/{rewardId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // -------------------- competitions/{competitionId} --------------------
+    // أي حد مسجل دخول يقدر يقرأ المسابقات (النشطة أو القديمة، للإدمن كمان).
+    // الإدمن بس يقدر يضيف/يعدّل/يحذف.
+    match /competitions/{competitionId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // -------------------- competitionResults/{resultId} --------------------
+    match /competitionResults/{resultId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // -------------------- notifications/{uid}/items/{notificationId} --------------------
+    match /notifications/{uid}/items/{notificationId} {
+      allow read, update: if isOwner(uid) || isAdmin();
+      allow create: if isAdmin();
+      allow delete: if isOwner(uid) || isAdmin();
+    }
+
+    // -------------------- courses/{courseId} --------------------
+    // البيانات العامة عن الكورس (اسم، سعر، وصف) — أي حد يقدر يقرأها من غير تسجيل دخول.
+    match /courses/{courseId} {
+      allow read: if true;
+      allow write: if isAdmin();
+
+      // 🔴 محتوى الكورس المحمي فعليًا (روابط اليوتيوب ودرايف الحقيقية)
+      // ده الجزء اللي بيمنع أي حد يفتح الكورس المدفوع من غير ما يدفع فعلاً.
+      // لازم تنقل الروابط الحقيقية هنا بدل ما تكون في data/courses.js وقت الإنتاج الفعلي.
+      match /protectedContent/{docId} {
+        allow read: if isSignedIn() &&
+          exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + courseId)) &&
+          get(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + courseId)).data.status == "approved";
+        allow write: if isAdmin();
+      }
+    }
+
+    // -------------------- analytics/summary --------------------
+    // بيانات تحليلية عامة — الإدمن بس يقدر يقرأها ويعدّلها.
+    match /analytics/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // -------------------- Default Deny --------------------
+    // أي مستند مش متغطي بقاعدة فوق، ممنوع تمامًا بشكل افتراضي.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
